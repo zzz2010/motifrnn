@@ -411,7 +411,7 @@ public class MotifSentimentModel implements Serializable {
 //			  tmp=1;
 //		  if(tmp<0)
 //			  tmp=0;
-		  pred_class.set(i, tmp-0.5);
+		  pred_class.set(i, tmp-1.0/pred_class.numCols());
 	}
 	  double importance=pred_class.normF();
 	  return importance;

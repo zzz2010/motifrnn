@@ -463,7 +463,6 @@ public class MotifSentimentTraining {
     }
 
 
-
     List<Tree> devTrees = null;
     if (devPath != null) {
       devTrees = Utils.readTreesWithGoldLabels(devPath);
