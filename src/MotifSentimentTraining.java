@@ -47,7 +47,7 @@ public class MotifSentimentTraining {
     double[] gradf = gcFunc.derivativeAt(theta);
     currCost = gcFunc.valueAt(theta);
 //    System.err.println("batch cost: " + Math.sqrt(currCost/model.numClasses)); //orignial print denote the avg error
-    System.err.println("batch cost: " + Utils.round(currCost/model.numClasses,4)+" regClass:"+Utils.round(gcFunc.regClassificationCost/model.numClasses,2)+" regTrans:"+Utils.round(gcFunc.regTransformCost/model.numClasses,2)+" regWord:"+Utils.round(gcFunc.regWordVectorCost/model.numClasses,2));  //already normalize batch_size
+ //   System.err.println("batch cost: " + Utils.round(currCost/model.numClasses,4)+" regClass:"+Utils.round(gcFunc.regClassificationCost/model.numClasses,2)+" regTrans:"+Utils.round(gcFunc.regTransformCost/model.numClasses,2)+" regWord:"+Utils.round(gcFunc.regWordVectorCost/model.numClasses,2));  //already normalize batch_size
    double maxGradient=0;
     for (int feature = 0; feature<gradf.length;feature++ ) {
       sumGradSquare[feature] = sumGradSquare[feature] + gradf[feature]*gradf[feature];
@@ -55,9 +55,9 @@ public class MotifSentimentTraining {
       if(gradf[feature]>maxGradient) //apply gradient clipping
     	  maxGradient=gradf[feature];
     } 
-    System.err.println("max Gradient: " +maxGradient);
+   // System.err.println("max Gradient: " +maxGradient);
     allbatchCost+=currCost;
-
+    // update model parameter
     model.vectorToParams(theta);   
     
   }
@@ -232,6 +232,124 @@ public class MotifSentimentTraining {
 //             eval.printSummary();
 ////             score =1/eval.rootPredictionError; //eval.exactNodeAccuracy() * 100.0;
 //           }
+//		}
+		return bestModel;
+	  }
+  
+  
+  
+  public static MotifSentimentModel train_multiThread_nojoin(MotifSentimentModel model, String modelPath, List<Tree> trainingTrees, List<Tree> devTrees, int threadNum) {
+	    Timing timing = new Timing();
+	    long maxTrainTimeMillis = model.op.trainOptions.maxTrainTimeSeconds * 1000;
+	    int debugCycle = 0;
+	    double bestCost=Double.MAX_VALUE;
+	    String bestModelStr="";
+	    MotifSentimentModel bestModel=null;
+	    List<List<Tree>> InvestigateExamples=null;
+	    if(Utils.findNonExchangableExample)
+	    {
+	     InvestigateExamples = ExampleFinder.exchangeGrammarFailed_Examples(trainingTrees);
+	    System.out.println("Number of InvestigateExamples is "+InvestigateExamples.size());
+	    }
+	    double bestAccuracy = 0.0;
+	    OneTrainingBatchThread.tempPath=modelPath+".tmp";
+	    // train using AdaGrad (seemed to work best during the dvparser project)
+	    double[] sumGradSquare = new double[model.totalParamSize()];
+	    Arrays.fill(sumGradSquare, model.op.trainOptions.initialAdagradWeight);
+	    
+	    int numBatches = trainingTrees.size() / model.op.trainOptions.batchSize ;
+	    if(numBatches*model.op.trainOptions.batchSize<trainingTrees.size() )
+	    {
+	    	numBatches+=1;
+	    }
+	    ExecutorService threadPool = Executors.newScheduledThreadPool(Math.min(threadNum, numBatches));
+	    System.err.println("Training on " + trainingTrees.size() + " trees in " + numBatches + " batches");
+	    System.err.println("Times through each training batch: " + model.op.trainOptions.epochs);
+	    double allbatchCost_last=Double.MAX_VALUE;
+	    for (int epoch = 0; epoch < model.op.trainOptions.epochs; ++epoch) {
+	      System.err.println("======================================");
+		    //initialize the thread pool manager
+//		    PooledExecutor executor=new PooledExecutor(new LinkedQueue());
+//		    executor.setKeepAliveTime(maxTrainTimeMillis);
+//		    executor.setMaximumPoolSize(Math.min(threadNum, numBatches));
+		   
+		    
+		    
+	      System.err.println("Starting epoch " + epoch);
+	      if (epoch > 0 && model.op.trainOptions.adagradResetFrequency > 0 && 
+	          (epoch % model.op.trainOptions.adagradResetFrequency == 0)) {
+	        System.err.println("Resetting adagrad weights to " + model.op.trainOptions.initialAdagradWeight);
+	        Arrays.fill(sumGradSquare, model.op.trainOptions.initialAdagradWeight);
+	      }
+	      List<Tree> shuffledSentences = Generics.newArrayList(trainingTrees);
+	      Collections.shuffle(shuffledSentences, model.rand);
+	      allbatchCost=0;
+	      for (int batch = 0; batch < numBatches; ++batch) {
+	        int startTree = batch * model.op.trainOptions.batchSize;
+	        int endTree = (batch + 1) * model.op.trainOptions.batchSize;
+	        if (endTree + model.op.trainOptions.batchSize > shuffledSentences.size()) {
+	          endTree = shuffledSentences.size();
+	        }
+	        // add batch Threads to the queue
+	        OneTrainingBatchThread thread=new OneTrainingBatchThread(model, shuffledSentences.subList(startTree, endTree), sumGradSquare, epoch, batch, devTrees,timing,maxTrainTimeMillis);
+			
+			threadPool.execute(thread);
+	      }
+
+
+	      AUCcomputeThread thread=new AUCcomputeThread( epoch,  model,
+			 bestModel,  bestAccuracy,
+			devTrees,  timing,  bestModelStr);
+
+	      threadPool.execute(thread);
+	      System.gc();
+
+
+	    }
+	    
+		try {
+		      threadPool.shutdown();
+		      threadPool.awaitTermination(maxTrainTimeMillis, TimeUnit.MILLISECONDS);
+//			executor.shutdownAfterProcessingCurrentlyQueuedTasks();
+//			executor.awaitTerminationAfterShutdown();
+		} catch (InterruptedException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+	      //check the investigate examples:
+	    if(Utils.findNonExchangableExample)
+	    {
+	      List<List<Tree>> succExamples = ExampleFinder.predictableExamples(model, InvestigateExamples);
+	      if(succExamples.size()>0)
+	      {
+	    	  System.out.println("All Success Examples:");
+	    	  Iterator<List<Tree>> iter = succExamples.iterator();
+	    	  while(iter.hasNext())
+	    	  {
+		    	  List<Tree> succ_example = iter.next();
+		    	  System.out.println("-----------------------------------------");
+			    	  for (int i = 0; i <succ_example.size(); i++) {
+			    		  System.out.println("true:"+succ_example.get(i));
+			    		  Tree pred = succ_example.get(i).deepCopy();
+			    		  Predict_SetLabel(model, pred);
+			    		  System.out.println("pred:"+pred);
+					}
+	    	  }
+	      }
+	    }
+	    
+	    
+		System.out.println("Total Elapsed Time is "+ timing.report()/1000+" secondes");
+//		if(bestCost<allbatchCost_last)
+//		{
+		model=bestModel;
+		 System.out.println("current best model :"+bestModelStr);
+//       if (devTrees != null) {
+//           MotifEvaluate eval = new MotifEvaluate(model);
+//           eval.eval(devTrees);
+//           eval.printSummary();
+////           score =1/eval.rootPredictionError; //eval.exactNodeAccuracy() * 100.0;
+//         }
 //		}
 		return bestModel;
 	  }
@@ -531,7 +649,7 @@ public class MotifSentimentTraining {
     	{	model.op.trainOptions.batchSize=trainingTrees.size()/numthreads/2;
     		if(model.op.trainOptions.batchSize>10000)
     			model.op.trainOptions.batchSize=10000;
-    		model=train_multiThread(model, trainPath+".model"+ op.randomSeed, trainingTrees, devTrees, numthreads); //make sure final return bestmodel
+    		model=train_multiThread_nojoin(model, trainPath+".model"+ op.randomSeed, trainingTrees, devTrees, numthreads); //make sure final return bestmodel
     	} //always use multi-thread version
 //    	else
 //    		train(model, trainPath+".model"+ op.randomSeed, trainingTrees, devTrees);
